@@ -1,0 +1,25 @@
+# Общие
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+
+# Конфиги
+config.json
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# mwb
+*.bak
+*.beforefix
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.tmp
+*.temp

@@ -1,0 +1,19 @@
+{
+  "Token": "YOUR_BOT_TOKEN_HERE",
+  "Prefix": "!",
+  "ConnectionStrings": "Server=localhost;Database=discord_bot;User=discord_bot;Password=YOUR_PASSWORD_HERE;",
+  "AdminIds": [536564769209974784],
+  "ActiveRoleId": null,
+  "InactivaRoleId": null,
+  "_commen_Ids": "Id можно получить включив режим разработчика в дискорде, нажав ПКМ по пользователю или роли и выбрав пункт скопировать Id. также поля можно заполнить через бота, используйте Помощь.",
+  "LogLevel": "Information",
+  "_commen_LogLevelt": "Допустимые значения: critical, error, warning, info or information, verbose, debug; Влияет на кол-во информации в консоле.",
+  "ActivitySettings": {
+    "MessageCoefficient": 1,
+    "VoiceCoefficient": 0.5,
+    "ActivityThreshold": 100,
+    "_comment_threshold": "Порог активности (сумма = сообщения * MessageCoefficient + войс * VoiceCoefficient)",
+    "UpdateIntervalHours": 24,
+    "_comment_UpdateIntervalHours": "Интервал перерасчета активности (в часах)"
+  }
+}
