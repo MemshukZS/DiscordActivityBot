@@ -229,14 +229,14 @@ namespace DiscordActivityBot
                     if (totalMessages + totalVoiceTime == 0)
                     {                        
                         embed = new EmbedBuilder()
-                            .WithTitle($"Статистика {(user as SocketGuildUser)?.Nickname ?? user.GlobalName}.")
+                            .WithTitle($"Статистика {_guild.GetUser(user.Id).DisplayName}.")
                             .WithDescription("Данные отсутствуют.")
                             .WithColor(Color.Gold);
                     }
                     else
                     {
                         embed = new EmbedBuilder()
-                            .WithTitle($"Статистика {(user as SocketGuildUser).Nickname} {(start == end ? $" за {start:dd.MM}" : $"c {start:dd.MM} по {end:dd.MM}" )}.")
+                            .WithTitle($"Статистика {_guild.GetUser(user.Id).DisplayName} {(start == end ? $" за {start:dd.MM}" : $"c {start:dd.MM} по {end:dd.MM}" )}.")
                             .AddField("Активность", $"{totalMessages * config.ActivitySettings.MessageCoefficient + totalVoiceTime * config.ActivitySettings.VoiceCoefficient}", true)
                             .AddField("Сообщения", $"{totalMessages} шт.", true)
                             .AddField("Войс", FormatVoiceTimeCompact(totalVoiceTime), true)
@@ -256,7 +256,7 @@ namespace DiscordActivityBot
                     {
                         var luser = _guild.GetUser(users[i].userId)?.DisplayName;
                         if (luser == null) luser = "Пользователь не найден";
-                        embed.AddField($"{i} - {luser}", users[i].activityScore); 
+                        embed.AddField($"{i + 1} - {luser}", users[i].activityScore); 
                     }                    
                     _ = message.Channel.SendMessageAsync(embed: embed.Build());
                     break;
