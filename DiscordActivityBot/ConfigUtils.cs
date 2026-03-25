@@ -54,7 +54,7 @@ namespace DiscordActivityBot
                 LogLevel = "Information",
                 AdminIds = new System.Collections.Generic.List<ulong>(),
                 ActiveRoleId = null,
-                InactivaRoleId = null,
+                InactiveRoleId = null,
                 ActivitySettings = new ActivitySettings()
                 {
                     MessageCoefficient = 1,

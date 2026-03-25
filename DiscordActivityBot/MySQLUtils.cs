@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Discord;
+using Discord.WebSocket;
 using MySqlConnector;
 
 namespace DiscordActivityBot
@@ -65,23 +67,6 @@ namespace DiscordActivityBot
             Program.WriteLog(LogSeverity.Info, "Таблицы инициализированы");
         }
 
-        public async Task UpdateUserAsync(ulong userId, bool active)
-        {
-            using var connection = new MySqlConnection(_connectionString);
-            await connection.OpenAsync();
-
-            string sql = @"
-                INSERT INTO `User` (`UID`, `Active`) 
-                VALUES (@uid, @active)
-                ON DUPLICATE KEY UPDATE 
-                `Active` = @active";
-
-            using var cmd = new MySqlCommand(sql, connection);
-            cmd.Parameters.AddWithValue("@uid", (long)userId);
-            cmd.Parameters.AddWithValue("@active", active ? 1 : 0);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
         private async Task EnsureUserExistsAsync(ulong userId)
         {
             using var connection = new MySqlConnection(_connectionString);
@@ -134,7 +119,7 @@ namespace DiscordActivityBot
             await cmd.ExecuteNonQueryAsync();
         }
 
-        public async Task<(int totalMessages, int totalVoiceTime, int activeDays)> GetUserStatsAsync(ulong userId)
+        public async Task<(int totalMessages, int totalVoiceTime, DateOnly startDate, DateOnly endDate)> GetUserStatsAsync(ulong userId)
         {
             using var connection = new MySqlConnection(_connectionString);
             await connection.OpenAsync();
@@ -143,7 +128,8 @@ namespace DiscordActivityBot
                 SELECT 
                     COALESCE(SUM(MessageCount), 0) as TotalMessages,
                     COALESCE(SUM(VoiceTime), 0) as TotalVoiceTime,
-                    COUNT(*) as ActiveDays
+                    MIN(Date) as MinDate,
+                    MAX(Date) as MaxDate
                 FROM UserStatistics
                 WHERE UID = @uid";
 
@@ -156,16 +142,17 @@ namespace DiscordActivityBot
                 return (
                     reader.GetInt32(0),
                     reader.GetInt32(1),
-                    reader.GetInt32(2)
+                    reader.GetDateOnly(2),
+                    reader.GetDateOnly(3)
                 );
             }
 
-            return (0, 0, 0);
+            return (0, 0, new DateOnly(), new DateOnly());
         }
 
-        public async Task<List<(ulong userId, int messageCount, int voiceTime)>> GetTopUsersAsync(int days = 7, int limit = 10)
+        public async Task<List<(ulong userId, int messageCount, int voiceTime, double activityScore)>> GetTopUsersAsync(int days = 7, int limit = 10)
         {
-            var result = new List<(ulong userId, int messageCount, int voiceTime)>();
+            var result = new List<(ulong userId, int messageCount, int voiceTime, double activityScore)>();
 
             using var connection = new MySqlConnection(_connectionString);
             await connection.OpenAsync();
@@ -174,16 +161,20 @@ namespace DiscordActivityBot
                 SELECT 
                     UID,
                     COALESCE(SUM(MessageCount), 0) as TotalMessages,
-                    COALESCE(SUM(VoiceTime), 0) as TotalVoiceTime
+                    COALESCE(SUM(VoiceTime), 0) as TotalVoiceTime,
+                    COALESCE(SUM(MessageCount), 0) * @messageCoeff + 
+                    COALESCE(SUM(VoiceTime), 0) * @voiceCoeff as ActivityScore
                 FROM UserStatistics
                 WHERE Date >= DATE_SUB(CURDATE(), INTERVAL @days DAY)
                 GROUP BY UID
-                ORDER BY TotalMessages DESC
+                ORDER BY ActivityScore DESC
                 LIMIT @limit";
 
             using var cmd = new MySqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@days", days);
             cmd.Parameters.AddWithValue("@limit", limit);
+            cmd.Parameters.AddWithValue("@messageCoeff", Program.config.ActivitySettings.MessageCoefficient);
+            cmd.Parameters.AddWithValue("@voiceCoeff", Program.config.ActivitySettings.VoiceCoefficient);
 
             using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
@@ -191,93 +182,65 @@ namespace DiscordActivityBot
                 result.Add((
                     (ulong)reader.GetInt64(0),
                     reader.GetInt32(1),
-                    reader.GetInt32(2)
+                    reader.GetInt32(2),
+                    reader.GetDouble(3)
                 ));
             }
 
             return result;
         }
-
-        public async Task<double> CalculateUserActivityAsync(ulong userId, double messageCoeff, double voiceCoeff)
+        public async Task UpdateUsersActivityAsync()
         {
             using var connection = new MySqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            // Считаем за последние 30 дней
-            string sql = @"
-                SELECT 
-                    COALESCE(SUM(MessageCount), 0) as TotalMessages,
-                    COALESCE(SUM(VoiceTime), 0) as TotalVoiceTime
-                FROM UserStatistics
-                WHERE UID = @uid AND Date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)";
+            string sql = @"UPDATE User u
+            LEFT JOIN (
+                SELECT UID, COALESCE(SUM(MessageCount), 0) * @messageCoeff + COALESCE(SUM(VoiceTime), 0) * @voiceCoeff as ActivityScore
+                FROM UserStatistics 
+                WHERE Date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) 
+                GROUP BY UID
+            ) us ON u.UID = us.UID
+            SET u.Active = us.ActivityScore >= @threshold
+            WHERE (us.ActivityScore >= @threshold) != (u.Active = 1);";
 
             using var cmd = new MySqlCommand(sql, connection);
-            cmd.Parameters.AddWithValue("@uid", (long)userId);
-
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
-            {
-                int messages = reader.GetInt32(0);
-                int voiceMinutes = reader.GetInt32(1);
-                
-                return (messages * messageCoeff) + (voiceMinutes * voiceCoeff);
-            }
-
-            return 0;
         }
-
-        public async Task UpdateAllUsersActivityAsync(double messageCoeff, double voiceCoeff, double threshold)
+        public async Task<List<(ulong, bool)>> GetUsersActivityUpdatedAsync(bool firstLoad)
         {
             using var connection = new MySqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            // Получаем всех пользователей с их статистикой за 30 дней
-            string sql = @"
-                SELECT 
-                    u.UID,
-                    COALESCE(SUM(us.MessageCount), 0) as TotalMessages,
-                    COALESCE(SUM(us.VoiceTime), 0) as TotalVoiceTime
-                FROM User u
-                LEFT JOIN UserStatistics us ON u.UID = us.UID 
-                    AND us.Date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-                GROUP BY u.UID";
+            string sql = @"WITH UserStats AS (
+                    SELECT UID,
+                        COALESCE(SUM(MessageCount), 0) * @messageCoeff + 
+                        COALESCE(SUM(VoiceTime), 0) * @voiceCoeff as Score
+                    FROM UserStatistics 
+                    WHERE Date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) 
+                    GROUP BY UID
+                )";
+                sql += firstLoad ?
+                    @"SELECT u.UID, (us.Score < @threshold) FROM User u
+                LEFT JOIN UserStats us ON u.UID = us.UID;"
+                :   @"SELECT u.UID, u.Active FROM User u
+                LEFT JOIN UserStats us ON u.UID = us.UID
+                WHERE (us.Score >= @threshold) != u.Active;";
 
-            var users = new List<(ulong uid, int messages, int voice, bool wasActive)>();
-            
-            using (var cmd = new MySqlCommand(sql, connection))
-            using (var reader = await cmd.ExecuteReaderAsync())
-            {
-                while (await reader.ReadAsync())
-                {
-                    users.Add((
-                        (ulong)reader.GetInt64(0),
-                        reader.GetInt32(1),
-                        reader.GetInt32(2),
-                        false
-                    ));
-                }
-            }
+            using var cmd = new MySqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@messageCoeff", Program.config.ActivitySettings.MessageCoefficient);
+            cmd.Parameters.AddWithValue("@voiceCoeff", Program.config.ActivitySettings.VoiceCoefficient);
+            cmd.Parameters.AddWithValue("@threshold", Program.config.ActivitySettings.ActivityThreshold);
 
-            // Обновляем активность каждого пользователя
-            int activeCount = 0;
-            foreach (var user in users)
-            {
-                double activity = (user.messages * messageCoeff) + (user.voice * voiceCoeff);
-                bool isActive = activity >= threshold;
-                
-                if (isActive) activeCount++;
-                
-                string updateSql = "UPDATE User SET Active = @active WHERE UID = @uid";
-                using var updateCmd = new MySqlCommand(updateSql, connection);
-                updateCmd.Parameters.AddWithValue("@uid", (long)user.uid);
-                updateCmd.Parameters.AddWithValue("@active", isActive ? 1 : 0);
-                await updateCmd.ExecuteNonQueryAsync();
-            }
+            using var reader = await cmd.ExecuteReaderAsync();
+            var result = new List<(ulong, bool)>();
 
-            Program.WriteLog(LogSeverity.Info, $"Обновлена активность пользователей: {activeCount} активных из {users.Count}");
+            while (await reader.ReadAsync())
+                result.Add(((ulong)reader.GetInt64(0), reader.GetBoolean(1)));
+
+            return result;
         }
 
-        public async Task<int> CleanupOldRecordsAsync(int daysToKeep = 30)
+        public async Task CleanupOldRecordsAsync(int daysToKeep = 30)
         {
             using var connection = new MySqlConnection(_connectionString);
             await connection.OpenAsync();
@@ -287,9 +250,10 @@ namespace DiscordActivityBot
             cmd.Parameters.AddWithValue("@days", daysToKeep);
             
             int deleted = await cmd.ExecuteNonQueryAsync();
-            Program.WriteLog(LogSeverity.Info, $"Удалено {deleted} старых записей");
+            if (deleted > 0)
+                Program.WriteLog(LogSeverity.Verbose, $"Удалено {deleted} старых записей");
             
-            return deleted;
+            return;
         }
     }
 }

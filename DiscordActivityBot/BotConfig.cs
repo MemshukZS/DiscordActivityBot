@@ -9,7 +9,7 @@ namespace DiscordActivityBot
         public string ConnectionStrings { get; set; }        
         public List<ulong> AdminIds { get; set; }
         public ulong? ActiveRoleId { get; set; }
-        public ulong? InactivaRoleId { get; set; }
+        public ulong? InactiveRoleId { get; set; }
         public string LogLevel { get; set; }
         public ActivitySettings ActivitySettings { get; set; }
     }
@@ -19,7 +19,7 @@ namespace DiscordActivityBot
         public double MessageCoefficient { get; set; }
         public double VoiceCoefficient { get; set; }
         public double ActivityThreshold { get; set; }
-        public int UpdateIntervalHours { get; set; }
+        public byte UpdateIntervalHours { get; set; }
     }
     
 }

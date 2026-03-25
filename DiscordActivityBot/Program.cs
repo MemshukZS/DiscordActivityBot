@@ -11,16 +11,19 @@ namespace DiscordActivityBot
     {
         private static DiscordSocketClient _client;
         private static readonly string configPath = "config.json";
-        private static BotConfig _config;
+        public static BotConfig config;
         private static MySQLUtils _db;
         private static LogSeverity _logLevel;
         private static Dictionary<ulong, DateTime> _voiceStartTimes = new Dictionary<ulong, DateTime>();
+        private static SocketGuild _guild;
+        private static DateTime lastUpdateActive;
+        private static DateTime nextAutoUpdateActive;
         
         static async Task Main(string[] args)
         {
-           if (!ConfigUtils.LoadConfig(configPath, out _config)) return;
+           if (!ConfigUtils.LoadConfig(configPath, out Program.config)) return;
 
-            _db = new MySQLUtils(_config.ConnectionStrings);
+            _db = new MySQLUtils(Program.config.ConnectionStrings);
 
             if (!await _db.TestConnectionAsync()) return;
             await _db.InitializeDatabaseAsync();
@@ -29,7 +32,7 @@ namespace DiscordActivityBot
             {
                 GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent | GatewayIntents.GuildMembers,
                 AlwaysDownloadUsers = true,
-                LogLevel = _logLevel = ConfigUtils.GetLogLevel(_config.LogLevel)
+                LogLevel = _logLevel = ConfigUtils.GetLogLevel(Program.config.LogLevel)
             };
             
             _client = new DiscordSocketClient(config);
@@ -39,7 +42,7 @@ namespace DiscordActivityBot
             _client.MessageReceived += MessageReceived;
             _client.UserVoiceStateUpdated += UserVoiceStateUpdated;    
             
-            await _client.LoginAsync(TokenType.Bot, _config.Token);
+            await _client.LoginAsync(TokenType.Bot, Program.config.Token);
             await _client.StartAsync();
             
             // Бесконечное ожидание
@@ -53,11 +56,23 @@ namespace DiscordActivityBot
         private static Task Ready()
         {
             #region Logs
-            WriteLog(LogSeverity.Info, $"Бот подклчюен как {_client.CurrentUser.Username}.");            
+            WriteLog(LogSeverity.Info, $"Бот подклчюен как {_client.CurrentUser.Username}.");
+            
+            // Получаем ID первой гильдии (или можно настроить в конфиге)
+            _guild = _client.Guilds.FirstOrDefault();
+            if (_guild != null)
+            {
+                WriteLog(LogSeverity.Info, $"Гильдия: {_guild.Name}");
+                
+                // Запускаем обновление активности
+                _ = AutoActivityUpdater();
+            }
+            else
+                WriteLog(LogSeverity.Warning, "Бот не состоит ни в одной гильдии!");    
 
-            if (_config.AdminIds.Count() == 0) WriteLog(LogSeverity.Warning, "Админы не заданы в конфиге. Для доступа к админ функциям будет использована проверка на администратора (право Administrator)");
-            if (_config.ActiveRoleId == null) WriteLog(LogSeverity.Warning, "В конфиге не установлена роль для активных пользователей (ActiveRoleId)");
-            if (_config.InactivaRoleId == null) WriteLog(LogSeverity.Warning, "В конфиге не установлена роль для не активных пользователей (DeactivateRoleId)");
+            if (config.AdminIds.Count() == 0) WriteLog(LogSeverity.Warning, "Админы не заданы в конфиге. Для доступа к админ функциям будет использована проверка на администратора (право Administrator)");
+            if (config.ActiveRoleId == null) WriteLog(LogSeverity.Warning, "В конфиге не установлена роль для активных пользователей (ActiveRoleId)");
+            if (config.InactiveRoleId == null) WriteLog(LogSeverity.Warning, "В конфиге не установлена роль для не активных пользователей (DeactivateRoleId)");
             #endregion
             return Task.CompletedTask;
         }
@@ -74,7 +89,7 @@ namespace DiscordActivityBot
             _ = _db.AddMessageStatAsync(message.Author.Id);
 
             if (message.Content.Length == 0) return;
-            if (message.Content[0] != _config.Prefix) return;
+            if (message.Content[0] != config.Prefix) return;
 
             string msg = message.Content;
             string[] command = msg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -98,27 +113,103 @@ namespace DiscordActivityBot
                         m.Embed = embed.Build();
                     });
                     break;                
+                case "help" or "помощь":
+                        embed = new EmbedBuilder()
+                            .WithTitle($"Помощь!")
+                            .WithDescription($@"
+                            **Основные команды**
+
+                            `{config.Prefix}пинг` | `{config.Prefix}ping`
+                            Проверка работы бота и измерение задержки реакции
+
+                            `{config.Prefix}помощь` | `{config.Prefix}help`
+                            Показать это сообщение
+
+                            `{config.Prefix}статистика [пользователь]` | `{config.Prefix}statistics [пользователь]`
+                            Статистика активности пользователя. Сокращения: стат и stat.
+                            *Примеры:* `{config.Prefix}статистика`, `{config.Prefix}стат @User`, `{config.Prefix}stat 123456789`
+
+                            `{config.Prefix}лидеры | {config.Prefix}leaderboard`
+                            Таблица лидеров по активности за неделю. Сокращения: тл и lb.
+
+                            **Администрирование**
+
+                            `{config.Prefix}роль <активный|неактивный> <роль>` | `{config.Prefix}role <active|inactive> <role>`
+                            Назначить роли для автоматической выдачи
+                            *Аргументы:* название, упоминание (@Роль) или ID роли
+                            *Пример:* `{config.Prefix}role активный @Активные`
+
+                            `{config.Prefix}роли` | `{config.Prefix}poles`
+                            Просмотр текущих настроенных ролей
+
+                            `{config.Prefix}активность [обновить]` | `{config.Prefix}active [update]`
+                            Информация о времени обновления активности. Сокращения: актив.
+                            *С параметром `update`* - принудительное обновление статуса
+
+                            **ℹДополнительно**
+
+                            **Период расчета:** последние 30 дней
+                            **Формула активности:** Сообщения × {config.ActivitySettings.MessageCoefficient} + Войс-минуты × {config.ActivitySettings.VoiceCoefficient}
+                            **Порог активности:** {config.ActivitySettings.ActivityThreshold}
+                            **Интервал обновления:** каждые {config.ActivitySettings.UpdateIntervalHours} ч.")
+                            .WithColor(Color.Green);
+                    
+                        _ = message.Channel.SendMessageAsync(embed: embed.Build());
+                    break;
                 case "role" or "роль":
                     if (!AdminCheck(message.Author)) { _ = SendError(message.Channel, "У вас нет прав администратора для использования данной команды."); return; }
-                    if (command.Length < 3) { _ = SendError(message.Channel, $"Не достаточно аргуменнтов для использования команды.\n{_config.Prefix}Роль <тип> <роль>\nДля подробной информации используйте {_config.Prefix}Помощь."); return; }
-                    if (!new List<string>{"active", "активный", "inactive", "неактивный"}.Contains(command[1].ToLower())) { _ = SendError(message.Channel, $"\"{command[1]}\" недопустимое значение для аргумента. Используйте: active/inactive или активный/неактивный\nДля подробной информации используйте {_config.Prefix}Помощь."); return; }
+                    if (command.Length < 3) { _ = SendError(message.Channel, $"Не достаточно аргуменнтов для использования команды.\n{config.Prefix}Роль <тип> <роль>\nДля подробной информации используйте {config.Prefix}Помощь."); return; }
+                    if (!new List<string>{"active", "активный", "inactive", "неактивный"}.Contains(command[1].ToLower())) { _ = SendError(message.Channel, $"\"{command[1]}\" недопустимое значение для аргумента. Используйте: active/inactive или активный/неактивный\nДля подробной информации используйте {config.Prefix}Помощь."); return; }
                     string arg2 = command.Length > 3 ? arg2 = string.Join(' ', command.Skip(1)) : command[2];
                     if (!FindRole((message.Channel as SocketGuildChannel).Guild, arg2, out SocketRole role)) { _ = SendError(message.Channel, $"Не удалось найти роль \"{arg2}\""); return; }
 
                     bool active = command[1].Equals("active", StringComparison.OrdinalIgnoreCase) || command[1].Equals("активный", StringComparison.OrdinalIgnoreCase);
                     if (active)
-                        _config.ActiveRoleId = role.Id;
+                        config.ActiveRoleId = role.Id;
                     else
-                        _config.InactivaRoleId = role.Id;
+                        config.InactiveRoleId = role.Id;
 
-                    ConfigUtils.SaveConfig(configPath, _config);
+                    ConfigUtils.SaveConfig(configPath, config);
                     embed = new EmbedBuilder()
                         .WithTitle($"Успех!")
                         .WithDescription($"В качестве {(active ? "активной" : "неактивной")} роли задана \"{role.Name}\".")
                         .WithColor(role.Color);
                     
                     _ = message.Channel.SendMessageAsync(embed: embed.Build());
-                    break;                
+                    break;           
+                case "roles" or "роли":
+                    SocketRole activeRole = config.ActiveRoleId.HasValue ? _guild.GetRole(config.ActiveRoleId.Value) : null;
+                    SocketRole inactiveRole = config.InactiveRoleId.HasValue ? _guild.GetRole(config.InactiveRoleId.Value) : null;
+
+                    embed = new EmbedBuilder()
+                        .WithTitle($"Установленые роли")
+                        .WithDescription($"{(activeRole != null ? $"В качестве активной роли задана \"{activeRole.Name}\"." : "Активная роль не задана!")}\n{(inactiveRole != null ? $"В качестве неактивной роли задана \"{inactiveRole.Name}\"." : "Неактивная роль не задана!")}")
+                        .WithColor((activeRole == null || inactiveRole == null) ? Color.Red : Color.Green);
+                    
+                    _ = message.Channel.SendMessageAsync(embed: embed.Build());
+                    break; 
+                case "active" or "активность" or "актив":
+                    if (command.Length == 1)
+                    {
+                        embed = new EmbedBuilder()
+                            .WithTitle($"Статус активности")
+                            .WithDescription($"Автоматическое обновление активности пользователей каждые **{config.ActivitySettings.UpdateIntervalHours} ч.**\nПоследнее обновление активности пользователей: **{lastUpdateActive:dd.MM HH:mm}**\nСледующее авто. обновление активности пользователей: **{nextAutoUpdateActive:dd.MM HH:mm}**")
+                            .WithColor(Color.Green);                        
+                    }
+                    else
+                    {
+                        if (!AdminCheck(message.Author)) { _ = SendError(message.Channel, "У вас нет прав администратора для использования аргументов данной команды."); return; }
+                        if (!new List<string>{"update", "обновить"}.Contains(command[1].ToLower())) { _ = SendError(message.Channel, $"\"{command[1]}\" недопустимое значение для аргумента. Используйте: update/обновить\nДля подробной информации используйте {config.Prefix}Помощь."); return; }
+                    
+                        embed = new EmbedBuilder()
+                            .WithTitle($"Обновление активности")
+                            .WithDescription($"Запущено принудительное обновление активности пользователей\nПоследнее обновление активности пользователей: **{lastUpdateActive:dd.MM HH:mm}**\nСледующее авто. обновление активности пользователей: **{nextAutoUpdateActive:dd.MM HH:mm}**")
+                            .WithColor(Color.Green);  
+
+                        _ = ActivityUpdater();
+                    }
+                    _ = message.Channel.SendMessageAsync(embed: embed.Build());
+                    break; 
                 case "statistics" or "stat" or "статистика" or "стат":
                     SocketUser user;
                     if (command.Length > 1)
@@ -133,9 +224,9 @@ namespace DiscordActivityBot
                     else
                         user = message.Author;
 
-                    (int totalMessages, int totalVoiceTime, int activeDays) = await _db.GetUserStatsAsync(user.Id);
+                    (int totalMessages, int totalVoiceTime, DateOnly start, DateOnly end) = await _db.GetUserStatsAsync(user.Id);
                     
-                    if (activeDays == 0)
+                    if (totalMessages + totalVoiceTime == 0)
                     {                        
                         embed = new EmbedBuilder()
                             .WithTitle($"Статистика {(user as SocketGuildUser)?.Nickname ?? user.GlobalName}.")
@@ -145,11 +236,28 @@ namespace DiscordActivityBot
                     else
                     {
                         embed = new EmbedBuilder()
-                            .WithTitle($"Статистика {(user as SocketGuildUser).Nickname} за {GetDaysString(activeDays)}.")
+                            .WithTitle($"Статистика {(user as SocketGuildUser).Nickname} {(start == end ? $" за {start:dd.MM}" : $"c {start:dd.MM} по {end:dd.MM}" )}.")
+                            .AddField("Активность", $"{totalMessages * config.ActivitySettings.MessageCoefficient + totalVoiceTime * config.ActivitySettings.VoiceCoefficient}", true)
                             .AddField("Сообщения", $"{totalMessages} шт.", true)
                             .AddField("Войс", FormatVoiceTimeCompact(totalVoiceTime), true)
                             .WithColor(Color.Green);
                     }
+                    _ = message.Channel.SendMessageAsync(embed: embed.Build());
+                    break;
+                case "leaderboard" or "lb" or "лидеры" or "тл":
+                    List<(ulong userId, int messageCount, int voiceTime, double activityScore)> users = await _db.GetTopUsersAsync();
+
+                    embed = new EmbedBuilder()
+                        .WithTitle($"Таблица лидеров.")
+                        .WithDescription($"Список самых активных пользователей! отображено: {users.Count}/{_guild.MemberCount}")
+                        .WithColor(Color.Gold);
+                    
+                    for (int i = 0; i < users.Count; i++)
+                    {
+                        var luser = _guild.GetUser(users[i].userId)?.DisplayName;
+                        if (luser == null) luser = "Пользователь не найден";
+                        embed.AddField($"{i} - {luser}", users[i].activityScore); 
+                    }                    
                     _ = message.Channel.SendMessageAsync(embed: embed.Build());
                     break;
             }
@@ -169,8 +277,8 @@ namespace DiscordActivityBot
             return role != null;
         }
         private static bool AdminCheck(SocketUser user) =>
-            _config.AdminIds.Count > 0 ?
-            _config.AdminIds.Contains(user.Id) :
+            config.AdminIds.Count > 0 ?
+            config.AdminIds.Contains(user.Id) :
             (user as SocketGuildUser).GuildPermissions.Administrator;
         private static string FormatVoiceTimeCompact(int minutes)
         {
@@ -178,23 +286,6 @@ namespace DiscordActivityBot
             int hours = minutes / 60;
             int mins = minutes % 60;
             return mins == 0 ? $"{hours} ч." : $"{hours} ч. {mins} мин.";
-        }
-        public static string GetDaysString(int days)
-        {
-            if (days < 0) days = 0;
-            
-            // Особые случаи: 11-14 всегда "дней"
-            int lastTwoDigits = days % 100;
-            if (lastTwoDigits >= 11 && lastTwoDigits <= 14)
-                return $"{days} дней";
-            
-            // Проверяем последнюю цифру
-            return (days % 10) switch
-            {
-                1 => $"{days} день",
-                2 or 3 or 4 => $"{days} дня",
-                _ => $"{days} дней"
-            };
         }
         private static bool FindUser(string str, out SocketUser user)
         {
@@ -265,27 +356,55 @@ namespace DiscordActivityBot
                 WriteLog(LogSeverity.Error, $"Ошибка в голосовом статусе: {ex.Message}");
             }
         }
-        private static async Task StartActivityUpdater()
+        
+        private static async Task AutoActivityUpdater()
         {
+            bool firstLoad = true;
             while (true)
             {
-                try
-                {
-                    WriteLog(LogSeverity.Info, $"Обновление активности пользователей...");
-                    
-                    await _db.UpdateAllUsersActivityAsync(
-                        _config.ActivitySettings.MessageCoefficient,
-                        _config.ActivitySettings.VoiceCoefficient,
-                        _config.ActivitySettings.ActivityThreshold);
-                    
-                    WriteLog(LogSeverity.Info, $"Активность обновлена. Следующее обновление через {_config.ActivitySettings.UpdateIntervalHours} ч.");
-                }
-                catch (Exception ex)
-                {
-                    WriteLog(LogSeverity.Error, $"Ошибка при обновлении активности: {ex.Message}");
-                }
+                _ = ActivityUpdater(firstLoad);
+                firstLoad = false;
+                byte hours = (byte)config.ActivitySettings.UpdateIntervalHours;
+                nextAutoUpdateActive = DateTime.Now.AddHours(hours);
+                await Task.Delay(TimeSpan.FromHours(hours));
+            }
+        }
+
+        private static async Task ActivityUpdater(bool firstLoad = false)
+        {
+            try
+            {
+                WriteLog(LogSeverity.Info, $"Проверка активности пользователей...");
+                SocketRole activeRole = config.ActiveRoleId.HasValue ? _guild.GetRole(config.ActiveRoleId.Value) : null;
+                SocketRole inactiveRole = config.InactiveRoleId.HasValue ? _guild.GetRole(config.InactiveRoleId.Value) : null;
+                if (activeRole == null) WriteLog(LogSeverity.Warning, $"Не удалось получить Активную роль, возможно ActiveRoleId задан не коректно.");
+                if (inactiveRole == null) WriteLog(LogSeverity.Warning, $"Не удалось получить Неактивную роль, возможно InactiveRoleId задан не коректно.");
                 
-                await Task.Delay(TimeSpan.FromHours(_config.ActivitySettings.UpdateIntervalHours));
+                await _db.CleanupOldRecordsAsync();
+                var Users = await _db.GetUsersActivityUpdatedAsync(firstLoad);
+                _ = _db.UpdateUsersActivityAsync();
+
+                var counter = 0;
+                foreach ((ulong uid, bool oldActive) in Users)
+                {
+                    var user =_guild.GetUser(uid);
+                    if (user == null) { WriteLog(LogSeverity.Warning, $"Пользователь {uid} не обнаружен. Возможно он покинул гильдию."); continue; }
+
+                    (var removeRole, var addRole) = oldActive ? (activeRole, inactiveRole) : (inactiveRole, activeRole);
+                    byte editRole = 0;
+                    if (removeRole != null && user.Roles.Contains(removeRole)) { editRole++; _ = user.RemoveRoleAsync(removeRole); } 
+                    if (addRole != null && !user.Roles.Contains(addRole)) { editRole++; _ = user.AddRoleAsync(addRole); }
+
+                    if (editRole != 0) counter++;
+                };
+                
+                lastUpdateActive = DateTime.Now;
+
+                WriteLog(LogSeverity.Info, Users.Count > 0 ? $"Активность изменена у {counter}/{Users.Count} пользователей." : "Активность пользователей не изменилась.");
+            }
+            catch (Exception ex)
+            {
+                WriteLog(LogSeverity.Error, $"Ошибка при обновлении активности: {ex.Message}");
             }
         }
     }
