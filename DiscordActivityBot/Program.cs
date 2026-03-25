@@ -112,7 +112,20 @@ namespace DiscordActivityBot
                         m.Content = null;
                         m.Embed = embed.Build();
                     });
-                    break;                
+                    break;
+                case "loadconfig" or "lc" or "загрузитьконфиг" or "зк":
+                    if (!AdminCheck(message.Author)) { _ = SendError(message.Channel, "У вас нет прав администратора для использования данной команды."); return; }
+                    if (ConfigUtils.LoadConfig(configPath, out Program.config))
+                    {                        
+                        embed = new EmbedBuilder()
+                            .WithTitle($"Успех!")
+                            .WithDescription($"Конфиг загружен.")
+                            .WithColor(Color.Green);
+                        _ = message.Channel.SendMessageAsync(embed: embed.Build());
+                    }
+                    else
+                        _ = SendError(message.Channel, "Не удалось загрузить конфиг.");
+                    break;
                 case "help" or "помощь":
                         embed = new EmbedBuilder()
                             .WithTitle($"Помощь!")
@@ -133,6 +146,9 @@ namespace DiscordActivityBot
                             Таблица лидеров по активности за неделю. Сокращения: тл и lb.
 
                             **Администрирование**
+
+                            `{config.Prefix}загрузитьконфиг | {config.Prefix}loadconfig`
+                            Загрузить конфиг в память. Сокращения: зк и lc.
 
                             `{config.Prefix}роль <активный|неактивный> <роль>` | `{config.Prefix}role <active|inactive> <role>`
                             Назначить роли для автоматической выдачи
